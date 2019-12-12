@@ -1,0 +1,336 @@
+---
+title: "__DVD Data Analysis (Postgre, Dplyr, Plotly)__"
+author: "정희영"
+date: "`r format(Sys.Date())`"
+output:
+  html_document:
+    keep_md: true
+    code_folding: hide
+    fig_height: 6
+    fig_width: 10
+    highlight: textmate
+    theme: cosmo
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document:
+    fig_height: 6
+    fig_width: 10
+    toc: no
+  word_document:
+    fig_height: 6
+    fig_width: 9
+    toc: no
+---
+
+# __1 Project Overview__
+## 1.1 Project objective
+* Tryout PostgreSQL
+* Learn how to write basic SQL queries to get required data from DB
+* Perform data analysis with R (dplyr, plotly) with the DVD
+
+## 1.2 Used tools
+* PostgreSQL
+* R (DBI, dplyr, plotly)
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pd = '8359'
+```
+
+```{r, include=FALSE}
+library(RPostgreSQL)
+library(DBI)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+```
+
+# __2 SQL Query for Getting Data from DB__
+```{r}
+
+pgdrv <- dbDriver("PostgreSQL")
+
+con <- dbConnect(pgdrv, dbname="dvd", 
+                 port="5432", 
+                 user="postgres", 
+                 password=pd, 
+                 host="localhost")
+
+top_rented <- dbGetQuery(con, "SELECT c.name, COUNT(c.name) AS count_genre, SUM(p.amount) AS total_sale FROM payment p
+INNER JOIN rental r ON p.rental_id = r.rental_id
+INNER JOIN inventory i ON i.inventory_id = r.inventory_id
+INNER JOIN film_category fc ON fc.film_id = i.film_id
+INNER JOIN category c ON c.category_id = fc.category_id
+GROUP BY c.name
+ORDER BY count_genre DESC
+LIMIT 1")
+
+least_rented <- dbGetQuery(con, "SELECT c.name, COUNT(c.name) AS count_genre, SUM(p.amount) AS total_sale FROM payment p
+INNER JOIN rental r ON p.rental_id = r.rental_id
+INNER JOIN inventory i ON i.inventory_id = r.inventory_id
+INNER JOIN film_category fc ON fc.film_id = i.film_id
+INNER JOIN category c ON c.category_id = fc.category_id
+GROUP BY c.name
+ORDER BY count_genre ASC
+LIMIT 1")
+
+du_genre <- dbGetQuery(con, "SELECT x.name, COUNT(x.name) as num_user FROM (
+	SELECT DISTINCT c.name, r.customer_id FROM category c
+	INNER JOIN film_category fc ON c.category_id = fc.category_id
+	INNER JOIN inventory i ON i.film_id = fc.film_id
+	INNER JOIN rental r ON r.inventory_id = i.inventory_id) x 
+GROUP BY x.name
+ORDER BY x.name")
+
+ave_ren_rate <- dbGetQuery(con, "SELECT c.name, ROUND(AVG(f.rental_rate),2) AS average_rental_rate FROM category c 
+INNER JOIN film_category fc ON c.category_id = fc.category_id 
+INNER JOIN film f ON f.film_id = fc.film_id 
+GROUP BY c.name 
+ORDER BY average_rental_rate DESC;")
+
+re_time <- dbGetQuery(con, "SELECT x1.result, COUNT(x1.result) FROM (
+	SELECT (
+		CASE WHEN res.rental_duration > res.bw THEN 'early'
+		WHEN res.rental_duration = res.bw THEN 'on time'
+		WHEN res.rental_duration < res.bw THEN 'late'
+		ELSE 'NA'
+		END) AS result
+	FROM (SELECT x.* 
+		FROM (
+			SELECT f.film_id, f.rental_duration, DATE_PART('day',r.return_date - r.rental_date) AS bw 
+			FROM rental r 
+			INNER JOIN inventory i ON i.inventory_id = r.inventory_id 
+			INNER JOIN film f ON f.film_id = i.film_id
+		) x
+	) res
+) x1
+GROUP BY x1.result;")
+
+have_presence <- dbGetQuery(con, "SELECT c.country, COUNT(DISTINCT cus.customer_id) AS customer_base, SUM(p.amount) AS total_sale FROM customer cus 
+INNER JOIN address a ON cus.address_id = a.address_id
+INNER JOIN city ct ON a.city_id = ct.city_id
+INNER JOIN country c ON ct.country_id = c.country_id
+INNER JOIN payment p ON p.customer_id = cus.customer_id
+GROUP BY c.country
+ORDER BY total_sale DESC;")
+
+# get DB as a whole for in-depth analysis
+category <- dbGetQuery(con, "SELECT category_id, name FROM category")
+film_category <- dbGetQuery(con, "SELECT film_id, category_id FROM film_category")
+inventory <- dbGetQuery(con, "SELECT film_id, inventory_id FROM inventory")
+rental <- dbGetQuery(con, "SELECT rental_id, inventory_id FROM rental")
+payment <- dbGetQuery(con, "SELECT payment_id, payment_date, rental_id, amount FROM payment")
+film <- dbGetQuery(con, "SELECT film_id, title, rental_duration FROM film")
+
+# get sales and rent of each genre (desc)
+genre_rented <- dbGetQuery(con, "SELECT c.name, COUNT(c.name) AS count_genre, SUM(p.amount) AS total_sale FROM payment p
+INNER JOIN rental r ON p.rental_id = r.rental_id
+INNER JOIN inventory i ON i.inventory_id = r.inventory_id
+INNER JOIN film_category fc ON fc.film_id = i.film_id
+INNER JOIN category c ON c.category_id = fc.category_id
+GROUP BY c.name
+ORDER BY count_genre DESC")
+```
+
+
+# __3 Basic Analysis__
+## 3.1 Most and least lented genre
+```{r}
+top_rented
+least_rented
+```
+
+## 3.2 Number of distinct users that have rented each genre
+```{r}
+du_genre
+```
+
+## 3.3 Average rental rate for each genre
+```{r}
+ave_ren_rate
+```
+
+## 3.4 Number of films returned late, early, and on time
+```{r}
+re_time
+```
+
+## E. Countries that Rent A Film have a presence with their sales and customer base 
+```{r}
+have_presence
+```
+
+# __4 In-Depth Analysis__
+
+## 4.1 Real popularity of genres
+```{r,fig.height= 4, fig.width= 8}
+# get required variables
+nt = genre_rented %>% select(name, count_genre)
+
+# draw plot in descending order
+nt %>% 
+  plot_ly(x = ~name, y = ~count_genre) %>%
+  add_bars() %>%
+  layout(title ="Popularity of Genres (without Adjustment)",
+    autosize = T,
+    yaxis = list(title = '# of rents', range = c(600, 1200), showline = TRUE),
+    xaxis = list(type = 'category', title = 'Genre',  categoryorder = "array", categoryarray = ~c("Sports", "Animation", "Action", "Sci-Fi",  "Family", "Foreign", "Drama", "Documentary", "Games", "New", "Children", "Classics",  "Comedy", "Horror", "Travel", "Music") ))
+```
+__Question:__ Sports seems to be the most popular and Music seems to be the least. Is this really so?
+
+```{r,fig.height= 4, fig.width= 8}
+# connect category to film_id
+cf = merge(x = category, y = film_category, by = "category_id", y.all = TRUE)
+
+# number of disticnt films per category
+ci_s = cf %>% group_by(category_id) %>%
+  summarise(sum = sum(film_id/film_id))
+
+# get variables needed
+dfg = merge(x = category, y = ci_s) %>% select(name, sum)
+
+# draw plot in descending order
+dfg %>% 
+  plot_ly(x = ~name, y = ~sum) %>%
+  add_bars() %>%
+  layout(title ="Distinct Titles per Genre",
+    autosize = T,
+    yaxis = list(title = '# of Distinct Movies', range = c(45, 80), showline = TRUE),
+    xaxis = list(type = 'category', title = 'Genre',  categoryorder = "array", categoryarray = ~c("Sports", "Animation", "Action", "Sci-Fi",  "Family", "Foreign", "Drama", "Documentary", "Games", "New", "Children", "Classics",  "Comedy", "Horror", "Travel", "Music")))
+```
+__Insight:__ Sports has the most many number of distinct titles and music has the least. Given this, Sport and Music might not be the most and least poular genres respectively.
+
+```{r,fig.height= 4, fig.width= 8, warning=FALSE}
+
+# create adjusted rent count
+rrc = merge(x=nt, y=dfg) %>% transmute(name, arc =  count_genre / sum)
+
+rrc %>% 
+  plot_ly(x = ~name, y = ~arc, color = 'red') %>%
+  add_bars() %>%
+  layout(title ="Popularity of Genres (with Adjustment)",
+    autosize = T,
+    yaxis = list(title = '# of Rents', range = c(10, 18), showline = TRUE),
+    xaxis = list(type = 'category', title = 'Genre',  categoryorder = "array", categoryarray = ~c("Sports", "Animation", "Action", "Sci-Fi",  "Family", "Foreign", "Drama", "Documentary", "Games", "New", "Children", "Classics",  "Comedy", "Horror", "Travel", "Music") ))
+```
+__Insight:__ the plot above represents # of rents per genre divided by distinct titles per genre. It is observable that Sports is not as popular given its large number of distinct titles. __Music is actually more popular than Sports in this respect__.
+
+## 4.2 ROI (Return on Investment) of genres
+```{r,fig.height= 4, fig.width= 8, warning = FALSE, message=FALSE}
+
+# inventory count per film
+icf = inventory %>% count(film_id)
+
+# select need var
+nn = merge(icf, cf) %>% select(name, n) 
+
+# investment by genre
+ig = nn %>% group_by(name) %>%
+  summarise(sum = sum(n))
+
+# get sales per genre 
+gs = genre_rented %>% select(name, total_sale)
+
+git = merge(ig, gs)
+
+# regression
+ts_lm  <- lm(total_sale ~ sum, data = git)
+
+git %>%
+  plot_ly(x = ~sum, y = ~total_sale, color = ~name, hoverinfo = "text",
+          text = ~paste0("<b>", name, "</b> <br>",
+                         "Sales: ", total_sale, "<br>",
+                         "Inventory: ", sum)) %>%
+  
+  #add_lines(y = ~fitted(ts_lm), name = "Regression Line") %>%
+  layout(title = 'Relationship between Investment and Sales (by genre)',
+      xaxis = list(title = 'Inventory', zeroline = TRUE),
+      yaxis = list(title = 'Sales per Genre'))
+```
+__Insight:__ this plot shows whether each genre is generating enough sales proportionate to its inventory. The genre Childern and Classics are somewhat lagging behind, and Comedy is showing a good performance. However, there is no outlier probably because each genre contains many films. 
+
+## 4.3 ROI (Return on Investment) of each film
+```{r,fig.height= 4, fig.width= 8, warning = FALSE,  message=FALSE}
+
+# get only the needed variables
+ra = payment %>% select(rental_id, amount)
+ri = rental %>% select(rental_id, inventory_id)
+fi = inventory %>% select(inventory_id, film_id)
+ftr = film %>% select(film_id, title, rental_duration)
+
+# sum sales by rental_id
+rs = ra %>% group_by(rental_id) %>%
+  summarise(sum = sum(amount))
+
+# get sales per inventory_id
+spi = merge(x=rs,y=ri,by="rental_id", all.y=TRUE)
+
+# na to 0
+spi[is.na(spi)] = 0
+
+# film_id and sum
+fs = merge(x=spi, y=fi, by = 'inventory_id') %>% select(sum, film_id) 
+
+# inventory per film
+ipf = fs %>% count(film_id)
+
+# sales per film
+spf = fs %>% group_by(film_id) %>% summarise(sales_per_film = sum(sum))
+
+# sales and inventory of films
+fsi = merge(spf, ipf, by='film_id')
+
+tsnr = merge(fsi, ftr, by='film_id', all.y = TRUE) %>% select(title, sales_per_film, n, rental_duration)
+
+tsnr = tsnr[!is.na(tsnr$n),]
+
+tsnr = mutate(tsnr, ratio = sales_per_film / n)
+
+bin = cut(tsnr$ratio, 3, labels = c('High', 'Mid', 'Low'), include.lowest = FALSE, right = TRUE, ordered_result = FALSE)
+
+tsnr = cbind(tsnr, bin)
+
+tsnr %>%
+  plot_ly(x = ~n, y = ~sales_per_film, color = bin, hoverinfo = "text",
+          text = ~paste0("<b>", title, "</b> <br>",
+                         "Sales: ", sales_per_film, "<br>",
+                         "Inventory: ", n, "<br>",
+                         "Sales/Inventory: ", round(ratio, digit=2))) %>%
+  
+  #add_lines(y = ~fitted(ts_lm), name = "Regression Line") %>%
+  layout(title = 'Relationship between Investment and Sales (by film)',
+      xaxis = list(title = 'Inventory', zeroline = TRUE),
+      yaxis = list(title = 'Sales per Film'))
+
+```
+__Insight:__ this plot shows whether each film is generating enough sales with respect to its inventory. The three groups equally divides the lists of films according to their ratio of sales to invesment (inventory). By examining this table, we could know the what films need more inventory and what films the owner should not purchase more.
+
+
+## 4.4 Sales Trend
+```{r,fig.height= 4, fig.width= 8, warning = FALSE, message=FALSE}
+
+# select only the relevant variables
+payment = payment %>% select(amount, payment_date)
+
+payment$payment_date = format(as.Date(payment$payment_date), "%Y-%m")
+
+# sales per month
+spm = payment %>% group_by(payment_date) %>% summarise(sales_per_month = sum(amount))
+
+plot_ly(opacity = 1) %>% 
+    add_lines(x = ~spm$payment_date, y = ~spm$sales_per_month, name = "Sales Trend") %>%
+    layout(xaxis = list(title = 'Sales Amount'), yaxis = list(title = 'Time'))
+```
+__Insight:__ although the time horizon for this dataset is not long enough to draw quality insight, trend analysis is a case worth practicing.
+
+
+
+# __5 Reference__
+## 5.1 Source of the Data
+* [DVD database](http://www.postgresqltutorial.com/load-postgresql-sample-database)
+
+## 5.2 Study Material
+* [How to launch PostgreSQL Database](https://statkclee.github.io/data-science/ds-postgreSQL.html)
+* [How to use dplyr](https://statkclee.github.io/data-science/data-handling-dplyr.html)
+* [How to use plotly](https://statkclee.github.io/viz/viz-plotly.html)
+
